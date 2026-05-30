@@ -57,11 +57,11 @@
     });
   }
 
-  // 일정 생성
+  // 일정 생성 (BASE_SUNDAY = 이수화 첫 번째 당번, i=0)
   function generateSchedule(offWeeks, absences) {
     const schedule = [];
     const base = parseDate(BASE_SUNDAY);
-    let memberIdx = 0;
+    let memberIdx = 0; // i=0(BASE_SUNDAY)부터 카운트, 0=이수화
 
     for (let i = -2; i < 60; i++) {
       const d = new Date(base.getFullYear(), base.getMonth(), base.getDate() + i*7);
@@ -72,10 +72,17 @@
         continue;
       }
 
-      const activeMembers = getActiveMembers(sunday, absences);
-      const member = activeMembers[memberIdx % activeMembers.length];
-      schedule.push({ sunday, member, off: false, activeMembers });
-      memberIdx++;
+      if (i < 0) {
+        // BASE_SUNDAY 이전: 전체 멤버 기준 역산
+        const idx = ((i % ALL_MEMBERS.length) + ALL_MEMBERS.length) % ALL_MEMBERS.length;
+        schedule.push({ sunday, member: ALL_MEMBERS[idx], off: false });
+      } else {
+        // BASE_SUNDAY 이후: 활성 멤버만 순환
+        const activeMembers = getActiveMembers(sunday, absences);
+        const member = activeMembers[memberIdx % activeMembers.length];
+        schedule.push({ sunday, member, off: false });
+        memberIdx++;
+      }
     }
     return schedule;
   }
