@@ -17,64 +17,54 @@
 <div id="root"></div>
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-  import { getDatabase, ref, push, update, remove, set, onValue } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+  import { getDatabase, ref, push, update, remove, onValue } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
 
   const firebaseConfig = { databaseURL: "https://church-snack-default-rtdb.firebaseio.com" };
   const app = initializeApp(firebaseConfig);
   const db = getDatabase(app);
 
   const ALL_MEMBERS = ["이수화", "박보연", "정소영", "박경애", "김순화", "김상희"];
-  const BASE_SUNDAY = "2026-05-03"; // 이수화 시작
-
-  // 방학 기간 중 빠지는 멤버 설정
-  const VACATION_ABSENT = ["김순화", "박보연"];
-  const VACATION_START = "2026-06-08";
-  const VACATION_END = "2026-08-03";
+  const BASE_SUNDAY = "2026-05-03";
 
   function getTodayDayCST() {
-    const cst = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Chicago" }));
-    return cst.getDay();
+    return new Date(new Date().toLocaleString("en-US", { timeZone: "America/Chicago" })).getDay();
   }
-
   function getTodayStrCST() {
-    const cst = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Chicago" }));
-    return `${cst.getFullYear()}-${String(cst.getMonth()+1).padStart(2,"0")}-${String(cst.getDate()).padStart(2,"0")}`;
+    const c = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Chicago" }));
+    return `${c.getFullYear()}-${String(c.getMonth()+1).padStart(2,"0")}-${String(c.getDate()).padStart(2,"0")}`;
   }
-
   function parseDate(str) {
     const [y,m,d] = str.split("-").map(Number);
     return new Date(y, m-1, d);
   }
-
   function getSundayStr() {
     const day = getTodayDayCST();
     const d = parseDate(getTodayStrCST());
-    d.setDate(d.getDate() + (day === 0 ? 0 : 7 - day));
+    d.setDate(d.getDate() + (day===0?0:7-day));
     return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
   }
-
   function formatDate(str) {
     const [,m,d] = str.split("-");
     return `${parseInt(m)}월 ${parseInt(d)}일 (주일)`;
   }
 
-  // 해당 주일에 활동 가능한 멤버 목록
-  function getActiveMembersForWeek(sunday) {
-    if (sunday >= VACATION_START && sunday <= VACATION_END) {
-      return ALL_MEMBERS.filter(m => !VACATION_ABSENT.includes(m));
-    }
-    return ALL_MEMBERS;
+  // 해당 주일에 활동 가능한 멤버 (휴가 설정 반영)
+  function getActiveMembers(sunday, absences) {
+    return ALL_MEMBERS.filter(member => {
+      const a = absences[member];
+      if (!a || !a.start || !a.end) return true;
+      return !(sunday >= a.start && sunday <= a.end);
+    });
   }
 
-  // 일정 생성: 쉬는 주일 제외, 방학 기간 멤버 조정
-  function generateSchedule(offWeeks = []) {
+  // 일정 생성
+  function generateSchedule(offWeeks, absences) {
     const schedule = [];
     const base = parseDate(BASE_SUNDAY);
-    let memberIdx = 0; // 전체 순번 카운터
-    let prevMembers = ALL_MEMBERS; // 이전 주 활성 멤버
+    let memberIdx = 0;
 
     for (let i = -2; i < 60; i++) {
-      const d = new Date(base.getFullYear(), base.getMonth(), base.getDate() + i * 7);
+      const d = new Date(base.getFullYear(), base.getMonth(), base.getDate() + i*7);
       const sunday = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
 
       if (offWeeks.includes(sunday)) {
@@ -82,9 +72,9 @@
         continue;
       }
 
-      const activeMembers = getActiveMembersForWeek(sunday);
+      const activeMembers = getActiveMembers(sunday, absences);
       const member = activeMembers[memberIdx % activeMembers.length];
-      schedule.push({ sunday, member, off: false });
+      schedule.push({ sunday, member, off: false, activeMembers });
       memberIdx++;
     }
     return schedule;
@@ -93,113 +83,114 @@
   let state = {
     currentUser: null,
     swapRequests: [],
-    offWeeks: [], // 쉬는 주일 목록
+    offWeeks: [],
+    absences: {}, // { "박보연": { start: "2026-06-14", end: "2026-08-03" }, ... }
     activeTab: "schedule",
     showSwapForm: false,
     swapForm: { myWeek: "", reason: "" },
     notification: null,
     showOffForm: false,
+    showAbsenceForm: false,
+    absenceForm: { member: "", start: "", end: "" },
   };
 
   const todaySunday = getSundayStr();
 
-  // Firebase 실시간 연결 - 교환 요청
+  // Firebase 연결 - 교환 요청
   onValue(ref(db, "swapRequests"), (snapshot) => {
     const data = snapshot.val();
     if (data) {
-      const all = Object.entries(data).map(([firebaseId, val]) => ({ ...val, firebaseId }));
+      const all = Object.entries(data).map(([fid, val]) => ({ ...val, firebaseId: fid }));
       all.forEach(req => {
-        const refWeek = req.status === "approved"
-          ? (req.myWeek < req.targetWeek ? req.targetWeek : req.myWeek)
-          : req.myWeek;
-        if (refWeek < todaySunday) remove(ref(db, "swapRequests/" + req.firebaseId));
+        const refWeek = req.status==="approved" ? (req.myWeek < req.targetWeek ? req.targetWeek : req.myWeek) : req.myWeek;
+        if (refWeek < todaySunday) remove(ref(db, "swapRequests/"+req.firebaseId));
       });
-      state.swapRequests = all
-        .filter(req => {
-          const refWeek = req.status === "approved"
-            ? (req.myWeek < req.targetWeek ? req.targetWeek : req.myWeek)
-            : req.myWeek;
-          return refWeek >= todaySunday;
-        })
-        .sort((a, b) => b.id - a.id);
-    } else {
-      state.swapRequests = [];
-    }
+      state.swapRequests = all.filter(req => {
+        const refWeek = req.status==="approved" ? (req.myWeek < req.targetWeek ? req.targetWeek : req.myWeek) : req.myWeek;
+        return refWeek >= todaySunday;
+      }).sort((a,b) => b.id-a.id);
+    } else state.swapRequests = [];
     render();
   });
 
-  // Firebase 실시간 연결 - 쉬는 주일
+  // Firebase 연결 - 쉬는 주일
   onValue(ref(db, "offWeeks"), (snapshot) => {
     const data = snapshot.val();
     state.offWeeks = data ? Object.values(data) : [];
     render();
   });
 
-  function getEffectiveMember(sundayStr, schedule) {
-    const entry = schedule.find(s => s.sunday === sundayStr);
-    if (!entry || entry.off) return null;
+  // Firebase 연결 - 휴가 설정
+  onValue(ref(db, "absences"), (snapshot) => {
+    const data = snapshot.val();
+    state.absences = data || {};
+    render();
+  });
 
+  function getEffectiveMember(sunday, schedule) {
+    const entry = schedule.find(s => s.sunday===sunday);
+    if (!entry || entry.off) return null;
     const approved = state.swapRequests.find(r =>
-      r.status === "approved" && (r.myWeek === sundayStr || r.targetWeek === sundayStr)
+      r.status==="approved" && (r.myWeek===sunday || r.targetWeek===sunday)
     );
     if (approved) {
-      if (approved.myWeek === sundayStr) return approved.acceptor;
-      if (approved.targetWeek === sundayStr) return approved.requester;
+      if (approved.myWeek===sunday) return approved.acceptor;
+      if (approved.targetWeek===sunday) return approved.requester;
     }
     return entry.member;
   }
 
-  function showNotif(msg, type = "success") {
+  function showNotif(msg, type="success") {
     state.notification = { msg, type };
     render();
-    setTimeout(() => { state.notification = null; render(); }, 2800);
+    setTimeout(() => { state.notification=null; render(); }, 2800);
   }
-
-  function setState(updates) {
-    state = { ...state, ...updates };
-    render();
-  }
+  function setState(updates) { state = { ...state, ...updates }; render(); }
 
   async function handleSwapRequest() {
-    if (!state.swapForm.myWeek || !state.swapForm.reason.trim()) {
-      showNotif("날짜와 사유를 모두 입력해주세요.", "error"); return;
-    }
-    await push(ref(db, "swapRequests"), {
-      id: Date.now(),
-      requester: state.currentUser,
-      myWeek: state.swapForm.myWeek,
-      reason: state.swapForm.reason,
-      status: "pending",
-      targetWeek: null,
-      acceptor: null,
-    });
+    if (!state.swapForm.myWeek || !state.swapForm.reason.trim()) { showNotif("날짜와 사유를 모두 입력해주세요.", "error"); return; }
+    await push(ref(db, "swapRequests"), { id: Date.now(), requester: state.currentUser, myWeek: state.swapForm.myWeek, reason: state.swapForm.reason, status: "pending", targetWeek: null, acceptor: null });
     setState({ swapForm: { myWeek: "", reason: "" }, showSwapForm: false });
     showNotif("교환 요청 등록! 다른 분들께 바로 보여요 😊");
   }
 
   async function handleAcceptConfirm(reqId, selectedWeek) {
-    const req = state.swapRequests.find(r => r.id === reqId);
-    if (!req || !selectedWeek) { showNotif("교환할 내 당번이 없어요.", "error"); return; }
-    await update(ref(db, `swapRequests/${req.firebaseId}`), {
-      status: "approved", acceptor: state.currentUser, targetWeek: selectedWeek
-    });
+    const req = state.swapRequests.find(r => r.id===reqId);
+    if (!req || !selectedWeek) { showNotif("교환할 수 있는 내 당번이 없어요.", "error"); return; }
+    await update(ref(db, `swapRequests/${req.firebaseId}`), { status: "approved", acceptor: state.currentUser, targetWeek: selectedWeek });
     showNotif("교환 완료! 일정에 바로 반영됐어요 😊");
   }
 
   async function addOffWeek(sunday) {
-    if (state.offWeeks.includes(sunday)) { showNotif("이미 쉬는 주일이에요.", "error"); return; }
+    if (state.offWeeks.includes(sunday)) { showNotif("이미 설정된 주일이에요.", "error"); return; }
     await push(ref(db, "offWeeks"), sunday);
     showNotif(`${formatDate(sunday)} 모임 없음으로 설정됐어요!`);
   }
 
   async function removeOffWeek(sunday) {
-    const snapshot = await new Promise(resolve => onValue(ref(db, "offWeeks"), resolve, { onlyOnce: true }));
-    const data = snapshot.val();
-    if (data) {
-      const key = Object.entries(data).find(([k, v]) => v === sunday)?.[0];
-      if (key) await remove(ref(db, `offWeeks/${key}`));
-    }
+    await new Promise(resolve => onValue(ref(db, "offWeeks"), snap => {
+      const data = snap.val();
+      if (data) {
+        const key = Object.entries(data).find(([k,v]) => v===sunday)?.[0];
+        if (key) remove(ref(db, `offWeeks/${key}`));
+      }
+      resolve();
+    }, { onlyOnce: true }));
     showNotif(`${formatDate(sunday)} 모임 없음 해제됐어요.`);
+  }
+
+  async function saveAbsence() {
+    const { member, start, end } = state.absenceForm;
+    if (!member || !start || !end) { showNotif("모두 입력해주세요.", "error"); return; }
+    if (start > end) { showNotif("시작일이 종료일보다 늦어요.", "error"); return; }
+    await update(ref(db, `absences/${member}`), { start, end });
+    setState({ showAbsenceForm: false, absenceForm: { member: "", start: "", end: "" } });
+    showNotif(`${member}님 휴가 설정됐어요!`);
+  }
+
+  async function removeAbsence(member) {
+    await remove(ref(db, `absences/${member}`));
+    showNotif(`${member}님 휴가 해제됐어요.`);
   }
 
   function render() {
@@ -213,118 +204,151 @@
             <p style="color:#9c6b3c;margin-top:8px;font-size:14px">누구세요?</p>
           </div>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;width:100%;max-width:320px">
-            ${ALL_MEMBERS.map(name => `
-              <button onclick="selectUser('${name}')" style="padding:16px 8px;border-radius:14px;border:2px solid #f0d4a8;background:white;color:#5c3a1e;font-size:15px;font-weight:600;box-shadow:0 2px 8px rgba(92,58,30,0.08)">${name}</button>
-            `).join("")}
+            ${ALL_MEMBERS.map(name => `<button onclick="selectUser('${name}')" style="padding:16px 8px;border-radius:14px;border:2px solid #f0d4a8;background:white;color:#5c3a1e;font-size:15px;font-weight:600;box-shadow:0 2px 8px rgba(92,58,30,0.08)">${name}</button>`).join("")}
           </div>
         </div>`;
       return;
     }
 
-    const schedule = generateSchedule(state.offWeeks);
+    const schedule = generateSchedule(state.offWeeks, state.absences);
     const upcomingSchedule = schedule.filter(s => s.sunday >= todaySunday);
-    const myUpcoming = upcomingSchedule.filter(s => !s.off && getEffectiveMember(s.sunday, schedule) === state.currentUser);
-    const pendingForMe = state.swapRequests.filter(r => r.status === "pending" && r.requester !== state.currentUser);
-    const thisWeekEntry = schedule.find(s => s.sunday === todaySunday);
+    const myUpcoming = upcomingSchedule.filter(s => !s.off && getEffectiveMember(s.sunday, schedule)===state.currentUser);
+    const pendingForMe = state.swapRequests.filter(r => r.status==="pending" && r.requester!==state.currentUser);
+    const thisWeekEntry = schedule.find(s => s.sunday===todaySunday);
     const thisWeekMember = thisWeekEntry?.off ? null : getEffectiveMember(todaySunday, schedule);
-    const isMyTurn = thisWeekMember === state.currentUser;
-    const isVacationPeriod = state.currentUser && VACATION_ABSENT.includes(state.currentUser) && todaySunday >= VACATION_START && todaySunday <= VACATION_END;
+    const isMyTurn = thisWeekMember===state.currentUser;
+    const myAbsence = state.absences[state.currentUser];
+    const amAbsent = myAbsence && todaySunday >= myAbsence.start && todaySunday <= myAbsence.end;
 
     const notifHtml = state.notification ? `<div class="notif" style="background:${state.notification.type==="error"?"#ef4444":"#22c55e"}">${state.notification.msg}</div>` : "";
 
     let tabContent = "";
 
     if (state.activeTab === "schedule") {
+      // 휴가 설정된 멤버 표시
+      const absenceCards = Object.entries(state.absences).map(([member, a]) => `
+        <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:10px;padding:10px 12px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center">
+          <div>
+            <span style="font-size:13px;font-weight:600;color:#1d4ed8">🏖️ ${member}</span>
+            <span style="font-size:12px;color:#3b82f6;margin-left:6px">${formatDate(a.start)} ~ ${formatDate(a.end)}</span>
+          </div>
+          <button onclick="removeAbsenceBtn('${member}')" style="background:#fef2f2;color:#ef4444;border:none;border-radius:8px;padding:4px 10px;font-size:11px;font-weight:600">해제</button>
+        </div>`).join("");
+
       tabContent = `
         <h3 style="font-size:14px;color:#7a5c3a;margin:0 0 12px;font-weight:600">앞으로의 일정</h3>
-        ${upcomingSchedule.slice(0, 10).map(entry => {
-          if (entry.off) {
-            return `<div style="background:#f5f5f5;border:1px solid #e0e0e0;border-radius:12px;padding:12px 14px;margin-bottom:8px;display:flex;align-items:center;justify-content:space-between;opacity:0.7">
+        ${upcomingSchedule.slice(0,10).map(entry => {
+          if (entry.off) return `
+            <div style="background:#f5f5f5;border:1px solid #e0e0e0;border-radius:12px;padding:12px 14px;margin-bottom:8px;display:flex;align-items:center;justify-content:space-between;opacity:0.7">
               <div>
                 <p style="margin:0;font-size:12px;color:#999">${formatDate(entry.sunday)}</p>
                 <p style="margin:3px 0 0;font-size:15px;font-weight:600;color:#aaa">🏖️ 모임 없음</p>
               </div>
               <button onclick="removeOffWeekBtn('${entry.sunday}')" style="background:#fef2f2;color:#ef4444;border:none;border-radius:8px;padding:4px 10px;font-size:11px;font-weight:600">해제</button>
             </div>`;
-          }
           const member = getEffectiveMember(entry.sunday, schedule);
-          const isToday = entry.sunday === todaySunday;
-          const isMe = member === state.currentUser;
-          const isVacWeek = entry.sunday >= VACATION_START && entry.sunday <= VACATION_END;
-          return `<div style="background:${isToday?"#fef3e2":"white"};border:${isToday?"2px solid #e8a020":"1px solid #f0e8d8"};border-radius:12px;padding:12px 14px;margin-bottom:8px;display:flex;align-items:center;justify-content:space-between">
-            <div>
-              <p style="margin:0;font-size:12px;color:#9c8060">${formatDate(entry.sunday)}${isVacWeek?` <span style="color:#3b82f6;font-size:10px">방학기간</span>`:""}</p>
-              <p style="margin:3px 0 0;font-size:16px;font-weight:600;color:#3d2008">${member}${isMe?`<span style="font-size:11px;color:#c8860a;margin-left:6px">나</span>`:""}</p>
-            </div>
-            ${isToday?`<span style="font-size:18px">📍</span>`:""}
-          </div>`;
+          const isToday = entry.sunday===todaySunday;
+          const isMe = member===state.currentUser;
+          const absentThisWeek = Object.entries(state.absences).filter(([m,a]) => entry.sunday>=a.start && entry.sunday<=a.end).map(([m])=>m);
+          return `
+            <div style="background:${isToday?"#fef3e2":"white"};border:${isToday?"2px solid #e8a020":"1px solid #f0e8d8"};border-radius:12px;padding:12px 14px;margin-bottom:8px;display:flex;align-items:center;justify-content:space-between">
+              <div>
+                <p style="margin:0;font-size:12px;color:#9c8060">${formatDate(entry.sunday)}${absentThisWeek.length>0?` <span style="color:#3b82f6;font-size:10px">(${absentThisWeek.join(",")} 제외)</span>`:""}</p>
+                <p style="margin:3px 0 0;font-size:16px;font-weight:600;color:#3d2008">${member}${isMe?`<span style="font-size:11px;color:#c8860a;margin-left:6px">나</span>`:""}</p>
+              </div>
+              ${isToday?`<span style="font-size:18px">📍</span>`:""}
+            </div>`;
         }).join("")}
-        <button onclick="toggleOffForm()" style="width:100%;margin-top:8px;background:#f0e8d8;color:#7a5c3a;border:none;border-radius:12px;padding:10px;font-size:13px;font-weight:600">🏖️ 모임 없는 주일 설정</button>
+
+        <div style="margin-top:12px;display:flex;gap:8px">
+          <button onclick="toggleOffForm()" style="flex:1;background:#f0e8d8;color:#7a5c3a;border:none;border-radius:12px;padding:10px;font-size:12px;font-weight:600">🏖️ 모임 없는 주일</button>
+          <button onclick="toggleAbsenceForm()" style="flex:1;background:#eff6ff;color:#2563eb;border:none;border-radius:12px;padding:10px;font-size:12px;font-weight:600">👤 멤버 휴가 설정</button>
+        </div>
+
         ${state.showOffForm ? `
           <div style="background:#fef9f0;border:1px solid #f0d4a8;border-radius:14px;padding:16px;margin-top:10px">
             <p style="font-size:13px;font-weight:700;color:#5c3a1e;margin:0 0 10px">모임 없는 날짜 선택</p>
             <select id="offWeekSelect" style="width:100%;padding:10px;border-radius:10px;border:1px solid #f0d4a8;font-size:13px;background:white;color:#3d2008;margin-bottom:10px">
               <option value="">날짜 선택</option>
-              ${upcomingSchedule.filter(s => !s.off).map(s => `<option value="${s.sunday}">${formatDate(s.sunday)}</option>`).join("")}
+              ${upcomingSchedule.filter(s=>!s.off).map(s=>`<option value="${s.sunday}">${formatDate(s.sunday)}</option>`).join("")}
             </select>
             <div style="display:flex;gap:8px">
               <button onclick="submitOffWeek()" style="flex:1;background:#c8860a;color:white;border:none;border-radius:10px;padding:10px;font-size:13px;font-weight:600">설정</button>
               <button onclick="toggleOffForm()" style="flex:1;background:#f0e8d8;color:#7a5c3a;border:none;border-radius:10px;padding:10px;font-size:13px;font-weight:600">취소</button>
             </div>
-          </div>` : ""}`;
+          </div>` : ""}
+
+        ${state.showAbsenceForm ? `
+          <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:14px;padding:16px;margin-top:10px">
+            <p style="font-size:13px;font-weight:700;color:#1d4ed8;margin:0 0 10px">멤버 휴가/방학 설정</p>
+            <select id="absenceMember" onchange="updateAbsenceForm('member',this.value)" style="width:100%;padding:10px;border-radius:10px;border:1px solid #bfdbfe;font-size:13px;background:white;color:#3d2008;margin-bottom:8px">
+              <option value="">멤버 선택</option>
+              ${ALL_MEMBERS.map(m=>`<option value="${m}" ${state.absenceForm.member===m?"selected":""}>${m}</option>`).join("")}
+            </select>
+            <p style="font-size:11px;color:#3b82f6;margin:0 0 4px">시작 주일</p>
+            <select id="absenceStart" onchange="updateAbsenceForm('start',this.value)" style="width:100%;padding:10px;border-radius:10px;border:1px solid #bfdbfe;font-size:13px;background:white;color:#3d2008;margin-bottom:8px">
+              <option value="">시작 날짜 선택</option>
+              ${upcomingSchedule.filter(s=>!s.off).map(s=>`<option value="${s.sunday}" ${state.absenceForm.start===s.sunday?"selected":""}>${formatDate(s.sunday)}</option>`).join("")}
+            </select>
+            <p style="font-size:11px;color:#3b82f6;margin:0 0 4px">종료 주일</p>
+            <select id="absenceEnd" onchange="updateAbsenceForm('end',this.value)" style="width:100%;padding:10px;border-radius:10px;border:1px solid #bfdbfe;font-size:13px;background:white;color:#3d2008;margin-bottom:10px">
+              <option value="">종료 날짜 선택</option>
+              ${upcomingSchedule.filter(s=>!s.off).map(s=>`<option value="${s.sunday}" ${state.absenceForm.end===s.sunday?"selected":""}>${formatDate(s.sunday)}</option>`).join("")}
+            </select>
+            <div style="display:flex;gap:8px">
+              <button onclick="submitAbsence()" style="flex:1;background:#2563eb;color:white;border:none;border-radius:10px;padding:10px;font-size:13px;font-weight:600">설정</button>
+              <button onclick="toggleAbsenceForm()" style="flex:1;background:#dbeafe;color:#2563eb;border:none;border-radius:10px;padding:10px;font-size:13px;font-weight:600">취소</button>
+            </div>
+          </div>` : ""}
+
+        ${absenceCards ? `<div style="margin-top:12px">${absenceCards}</div>` : ""}`;
     }
 
     if (state.activeTab === "swap") {
-      const myAvailableWeeks = upcomingSchedule.filter(s => !s.off && getEffectiveMember(s.sunday, schedule) === state.currentUser);
+      const myAvailableWeeks = upcomingSchedule.filter(s => !s.off && getEffectiveMember(s.sunday, schedule)===state.currentUser);
       const formHtml = state.showSwapForm ? `
         <div style="background:#fef9f0;border:1px solid #f0d4a8;border-radius:14px;padding:16px;margin-bottom:14px">
           <p style="font-size:13px;font-weight:700;color:#5c3a1e;margin:0 0 12px">교환 요청 작성</p>
           <select id="swapWeek" onchange="updateSwapWeek(this.value)" style="width:100%;padding:10px;border-radius:10px;border:1px solid #f0d4a8;font-size:13px;margin-bottom:10px;background:white;color:#3d2008">
             <option value="">내 당번 날짜 선택</option>
-            ${myAvailableWeeks.map(s => `<option value="${s.sunday}" ${state.swapForm.myWeek===s.sunday?"selected":""}>${formatDate(s.sunday)}</option>`).join("")}
+            ${myAvailableWeeks.map(s=>`<option value="${s.sunday}" ${state.swapForm.myWeek===s.sunday?"selected":""}>${formatDate(s.sunday)}</option>`).join("")}
           </select>
-          <textarea id="swapReason" onchange="updateSwapReason(this.value)" placeholder="교환 사유를 입력해주세요..." rows="3" style="width:100%;padding:10px;border-radius:10px;border:1px solid #f0d4a8;font-size:13px;margin-bottom:10px;resize:none;color:#3d2008">${state.swapForm.reason}</textarea>
+          <textarea onchange="updateSwapReason(this.value)" placeholder="교환 사유를 입력해주세요..." rows="3" style="width:100%;padding:10px;border-radius:10px;border:1px solid #f0d4a8;font-size:13px;margin-bottom:10px;resize:none;color:#3d2008">${state.swapForm.reason}</textarea>
           <div style="display:flex;gap:8px">
             <button onclick="submitSwap()" style="flex:1;background:#c8860a;color:white;border:none;border-radius:10px;padding:10px;font-size:13px;font-weight:600">등록</button>
             <button onclick="closeSwapForm()" style="flex:1;background:#f0e8d8;color:#7a5c3a;border:none;border-radius:10px;padding:10px;font-size:13px;font-weight:600">취소</button>
           </div>
         </div>` : "";
 
-      const requestsHtml = state.swapRequests.length === 0 ?
+      const requestsHtml = state.swapRequests.length===0 ?
         `<div style="text-align:center;padding:40px 0;color:#c4a882"><p style="font-size:32px;margin:0 0 8px">🕊️</p><p style="font-size:13px">교환 요청이 없어요</p></div>` :
-        state.swapRequests.map(req => `
+        state.swapRequests.map(req=>`
           <div style="background:white;border:${req.status==="approved"?"1px solid #86efac":req.requester===state.currentUser?"1px solid #fcd34d":"1px solid #bfdbfe"};border-radius:14px;padding:14px;margin-bottom:10px">
             <span style="font-size:11px;font-weight:700;padding:2px 8px;border-radius:20px;background:${req.status==="approved"?"#dcfce7":req.requester===state.currentUser?"#fef9c3":"#eff6ff"};color:${req.status==="approved"?"#16a34a":req.requester===state.currentUser?"#ca8a04":"#2563eb"};margin-bottom:6px;display:inline-block">
               ${req.status==="approved"?"✅ 교환 완료":req.requester===state.currentUser?"⏳ 내 요청":"🙋 도움 요청"}
             </span>
             <p style="margin:4px 0 2px;font-size:14px;font-weight:600;color:#3d2008">${req.requester} · ${formatDate(req.myWeek)}</p>
             <p style="margin:0;font-size:12px;color:#9c8060">사유: ${req.reason}</p>
-            ${req.status==="approved"?`
-              <div style="margin-top:8px;background:#f0fdf4;border-radius:8px;padding:8px 10px">
-                <p style="margin:0;font-size:12px;color:#16a34a;font-weight:600;line-height:1.6">🔄 ${req.requester} (${formatDate(req.myWeek)})<br>&nbsp;&nbsp;&nbsp;↔ ${req.acceptor} (${formatDate(req.targetWeek)})</p>
-              </div>`:""}
-            ${req.status==="pending" && req.requester!==state.currentUser?`
-              <button onclick="acceptSwap(${req.id})" style="margin-top:10px;width:100%;background:#c8860a;color:white;border:none;border-radius:10px;padding:9px;font-size:13px;font-weight:600">내가 대신할게요!</button>`:""}
-            ${req.status==="pending" && req.requester===state.currentUser?`
-              <button onclick="cancelRequest('${req.firebaseId}')" style="margin-top:10px;width:100%;background:#fef2f2;color:#ef4444;border:none;border-radius:10px;padding:9px;font-size:13px;font-weight:600">요청 취소</button>`:""}
+            ${req.status==="approved"?`<div style="margin-top:8px;background:#f0fdf4;border-radius:8px;padding:8px 10px"><p style="margin:0;font-size:12px;color:#16a34a;font-weight:600;line-height:1.6">🔄 ${req.requester} (${formatDate(req.myWeek)})<br>&nbsp;&nbsp;&nbsp;↔ ${req.acceptor} (${formatDate(req.targetWeek)})</p></div>`:""}
+            ${req.status==="pending" && req.requester!==state.currentUser?`<button onclick="acceptSwap(${req.id})" style="margin-top:10px;width:100%;background:#c8860a;color:white;border:none;border-radius:10px;padding:9px;font-size:13px;font-weight:600">내가 대신할게요!</button>`:""}
+            ${req.status==="pending" && req.requester===state.currentUser?`<button onclick="cancelRequest('${req.firebaseId}')" style="margin-top:10px;width:100%;background:#fef2f2;color:#ef4444;border:none;border-radius:10px;padding:9px;font-size:13px;font-weight:600">요청 취소</button>`:""}
           </div>`).join("");
 
       tabContent = `
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
           <h3 style="font-size:14px;color:#7a5c3a;margin:0;font-weight:600">교환 요청</h3>
           <button onclick="toggleSwapForm()" style="background:#c8860a;color:white;border:none;border-radius:10px;padding:7px 14px;font-size:12px;font-weight:600">+ 요청하기</button>
-        </div>
-        ${formHtml}${requestsHtml}`;
+        </div>${formHtml}${requestsHtml}`;
     }
 
     if (state.activeTab === "my") {
       tabContent = `
         <h3 style="font-size:14px;color:#7a5c3a;margin:0 0 12px;font-weight:600">${state.currentUser}님의 앞으로 당번</h3>
-        ${isVacationPeriod?`<div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:12px;padding:12px;margin-bottom:12px;font-size:13px;color:#2563eb">🏖️ 방학 기간 중 당번에서 제외되어 있어요 (~ 8월 3일)</div>`:""}
+        ${amAbsent?`<div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:12px;padding:12px;margin-bottom:12px;font-size:13px;color:#2563eb">🏖️ 휴가/방학 기간 중이에요 (~ ${formatDate(myAbsence.end)})</div>`:""}
         ${myUpcoming.length===0?
           `<div style="text-align:center;padding:40px 0;color:#c4a882"><p style="font-size:32px;margin:0 0 8px">😴</p><p style="font-size:13px">당분간 당번이 없어요!</p></div>`:
-          myUpcoming.map(entry => {
-            const isToday = entry.sunday===todaySunday;
+          myUpcoming.map(entry=>{
+            const isToday=entry.sunday===todaySunday;
             return `<div style="background:${isToday?"#fef3e2":"white"};border:${isToday?"2px solid #e8a020":"1px solid #f0e8d8"};border-radius:14px;padding:16px;margin-bottom:10px;display:flex;align-items:center;gap:14px">
               <span style="font-size:28px">${isToday?"🍪":"📅"}</span>
               <div>
@@ -350,30 +374,23 @@
           <div style="margin-top:18px;background:white;border-radius:16px;padding:16px;box-shadow:0 4px 16px rgba(0,0,0,0.12)">
             <p style="color:#9c6b3c;font-size:11px;font-weight:600;margin:0 0 6px">이번 주일 당번 (${formatDate(todaySunday)})</p>
             <div style="display:flex;align-items:center;gap:10px">
-              <span style="font-size:28px">${thisWeekEntry?.off ? "🏖️" : "🍪"}</span>
+              <span style="font-size:28px">${thisWeekEntry?.off?"🏖️":"🍪"}</span>
               <div>
-                <p style="margin:0;font-size:20px;font-weight:700;color:#3d2008">${thisWeekEntry?.off ? "모임 없음" : thisWeekMember}</p>
+                <p style="margin:0;font-size:20px;font-weight:700;color:#3d2008">${thisWeekEntry?.off?"모임 없음":thisWeekMember}</p>
                 ${isMyTurn?`<span style="background:#fef3e2;color:#c8860a;font-size:11px;font-weight:700;padding:2px 8px;border-radius:20px">내 차례예요!</span>`:""}
               </div>
             </div>
           </div>
         </div>
-
         <div style="display:flex;background:white;border-bottom:1px solid #f0e8d8;position:sticky;top:0;z-index:10">
-          ${[
-            {key:"schedule",label:"📅 일정"},
-            {key:"swap",label:`🔄 교환${pendingForMe.length>0?` (${pendingForMe.length})`:""}`},
-            {key:"my",label:"👤 내 당번"}
-          ].map(tab=>`
+          ${[{key:"schedule",label:"📅 일정"},{key:"swap",label:`🔄 교환${pendingForMe.length>0?` (${pendingForMe.length})`:""}`},{key:"my",label:"👤 내 당번"}].map(tab=>`
             <button onclick="setTab('${tab.key}')" style="flex:1;padding:13px 4px;border:none;background:none;font-size:13px;font-weight:${state.activeTab===tab.key?"700":"400"};color:${state.activeTab===tab.key?"#c8860a":"#9c8060"};border-bottom:${state.activeTab===tab.key?"2px solid #c8860a":"2px solid transparent"}">${tab.label}</button>
           `).join("")}
         </div>
-
         <div style="padding:16px">${tabContent}</div>
       </div>`;
   }
 
-  // 전역 함수
   window.selectUser = n => setState({ currentUser: n });
   window.logout = () => setState({ currentUser: null });
   window.setTab = t => setState({ activeTab: t });
@@ -383,22 +400,20 @@
   window.updateSwapReason = v => setState({ swapForm: { ...state.swapForm, reason: v } });
   window.submitSwap = () => handleSwapRequest();
   window.acceptSwap = (reqId) => {
-    const req = state.swapRequests.find(r => r.id === reqId);
-    const schedule = generateSchedule(state.offWeeks);
-    const upcoming = schedule.filter(s => s.sunday >= todaySunday && !s.off);
-    const myWeeks = upcoming.filter(s => getEffectiveMember(s.sunday, schedule) === state.currentUser && s.sunday !== req.myWeek);
-    const earliest = myWeeks.length > 0 ? myWeeks[0].sunday : null;
-    if (!earliest) { showNotif("교환할 수 있는 내 당번이 없어요.", "error"); return; }
-    handleAcceptConfirm(reqId, earliest);
+    const req = state.swapRequests.find(r => r.id===reqId);
+    const schedule = generateSchedule(state.offWeeks, state.absences);
+    const upcoming = schedule.filter(s => s.sunday>=todaySunday && !s.off);
+    const myWeeks = upcoming.filter(s => getEffectiveMember(s.sunday, schedule)===state.currentUser && s.sunday!==req.myWeek);
+    handleAcceptConfirm(reqId, myWeeks.length>0 ? myWeeks[0].sunday : null);
   };
   window.cancelRequest = async fid => { await remove(ref(db, `swapRequests/${fid}`)); showNotif("요청이 취소됐어요.", "error"); };
   window.toggleOffForm = () => setState({ showOffForm: !state.showOffForm });
-  window.submitOffWeek = () => {
-    const sel = document.getElementById("offWeekSelect");
-    if (sel && sel.value) { addOffWeek(sel.value); setState({ showOffForm: false }); }
-    else showNotif("날짜를 선택해주세요.", "error");
-  };
+  window.submitOffWeek = () => { const sel=document.getElementById("offWeekSelect"); if(sel?.value){ addOffWeek(sel.value); setState({showOffForm:false}); } else showNotif("날짜를 선택해주세요.","error"); };
   window.removeOffWeekBtn = sunday => removeOffWeek(sunday);
+  window.toggleAbsenceForm = () => setState({ showAbsenceForm: !state.showAbsenceForm });
+  window.updateAbsenceForm = (key, val) => setState({ absenceForm: { ...state.absenceForm, [key]: val } });
+  window.submitAbsence = () => saveAbsence();
+  window.removeAbsenceBtn = member => removeAbsence(member);
 
   render();
 </script>
